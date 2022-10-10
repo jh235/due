@@ -68,7 +68,11 @@ func (e *endpoint) GetIP(ctx context.Context, req *pb.GetIPRequest) (*pb.GetIPRe
 
 // Push 推送消息给连接
 func (e *endpoint) Push(ctx context.Context, req *pb.PushRequest) (*pb.PushReply, error) {
-	msg, err := packet.Pack(&packet.Message{Route: req.Route, Buffer: req.Buffer})
+	msg, err := packet.Pack(&packet.Message{
+		Seq:    req.Message.Seq,
+		Route:  req.Message.Route,
+		Buffer: req.Message.Buffer,
+	})
 	if err != nil {
 		return nil, status.New(codes.Internal, err.Error()).Err()
 	}
@@ -89,7 +93,11 @@ func (e *endpoint) Push(ctx context.Context, req *pb.PushRequest) (*pb.PushReply
 
 // Multicast 推送组播消息
 func (e *endpoint) Multicast(ctx context.Context, req *pb.MulticastRequest) (*pb.MulticastReply, error) {
-	msg, err := packet.Pack(&packet.Message{Route: req.Route, Buffer: req.Buffer})
+	msg, err := packet.Pack(&packet.Message{
+		Seq:    req.Message.Seq,
+		Route:  req.Message.Route,
+		Buffer: req.Message.Buffer,
+	})
 	if err != nil {
 		return nil, status.New(codes.Internal, err.Error()).Err()
 	}
@@ -109,7 +117,11 @@ func (e *endpoint) Multicast(ctx context.Context, req *pb.MulticastRequest) (*pb
 
 // Broadcast 推送广播消息
 func (e *endpoint) Broadcast(ctx context.Context, req *pb.BroadcastRequest) (*pb.BroadcastReply, error) {
-	msg, err := packet.Pack(&packet.Message{Route: req.Route, Buffer: req.Buffer})
+	msg, err := packet.Pack(&packet.Message{
+		Seq:    req.Message.Seq,
+		Route:  req.Message.Route,
+		Buffer: req.Message.Buffer,
+	})
 	if err != nil {
 		return nil, status.New(codes.Internal, err.Error()).Err()
 	}
@@ -125,4 +137,25 @@ func (e *endpoint) Broadcast(ctx context.Context, req *pb.BroadcastRequest) (*pb
 	}
 
 	return &pb.BroadcastReply{Total: int64(total)}, nil
+}
+
+// Disconnect 断开连接
+func (e *endpoint) Disconnect(ctx context.Context, req *pb.DisconnectRequest) (*pb.DisconnectReply, error) {
+	s, err := e.gate.group.GetSession(session.Kind(req.Kind), req.Target)
+	if err != nil {
+		switch err {
+		case session.ErrSessionNotFound:
+			return nil, status.New(code.NotFoundSession, err.Error()).Err()
+		case session.ErrInvalidSessionKind:
+			return nil, status.New(codes.InvalidArgument, err.Error()).Err()
+		default:
+			return nil, status.New(codes.Internal, err.Error()).Err()
+		}
+	}
+
+	if err = s.Close(req.IsForce); err != nil {
+		return nil, status.New(codes.Internal, err.Error()).Err()
+	}
+
+	return &pb.DisconnectReply{}, nil
 }
