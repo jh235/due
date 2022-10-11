@@ -37,6 +37,8 @@ func TestNewClient(t *testing.T) {
 				t.Error(err)
 				return
 			}
+
+			//return
 		}
 	}
 }

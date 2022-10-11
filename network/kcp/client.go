@@ -1,8 +1,10 @@
 package kcp
 
 import (
+	"crypto/sha1"
 	"github.com/dobyte/due/network"
 	"github.com/xtaci/kcp-go"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 type client struct {
@@ -28,7 +30,10 @@ func NewClient(opts ...ClientOption) network.Client {
 
 // Dial 拨号连接
 func (c *client) Dial() (network.Conn, error) {
-	conn, err := kcp.DialWithOptions(c.opts.addr, nil, 0, 0)
+	key := pbkdf2.Key([]byte("demo pass"), []byte("demo salt"), 1024, 32, sha1.New)
+	block, _ := kcp.NewAESBlockCrypt(key)
+
+	conn, err := kcp.DialWithOptions(c.opts.addr, block, 10, 3)
 	if err != nil {
 		return nil, err
 	}

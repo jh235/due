@@ -8,16 +8,17 @@
 package kcp
 
 import (
-	"net"
-
+	"crypto/sha1"
+	"fmt"
 	"github.com/xtaci/kcp-go"
+	"golang.org/x/crypto/pbkdf2"
 
 	"github.com/dobyte/due/network"
 )
 
 type server struct {
 	opts              *serverOptions
-	listener          net.Listener
+	listener          *kcp.Listener
 	connMgr           *serverConnMgr
 	startHandler      network.StartHandler      // 服务器启动hook函数
 	stopHandler       network.CloseHandler      // 服务器关闭hook函数
@@ -52,7 +53,10 @@ func (s *server) Addr() string {
 
 // Start 启动服务器
 func (s *server) Start() error {
-	ln, err := kcp.Listen(s.opts.addr)
+	key := pbkdf2.Key([]byte("demo pass"), []byte("demo salt"), 1024, 32, sha1.New)
+	block, _ := kcp.NewAESBlockCrypt(key)
+
+	ln, err := kcp.ListenWithOptions(s.opts.addr, block, 10, 3)
 	if err != nil {
 		return err
 	}
@@ -62,12 +66,12 @@ func (s *server) Start() error {
 		s.startHandler()
 	}
 
-	go s.serve()
+	s.serve()
 
 	return nil
 }
 
-// Close 关闭服务器
+// Stop 关闭服务器
 func (s *server) Stop() error {
 	if err := s.listener.Close(); err != nil {
 		return err
@@ -88,7 +92,7 @@ func (s *server) OnStart(handler network.StartHandler) {
 	s.startHandler = handler
 }
 
-// OnClose 监听服务器关闭
+// OnStop 监听服务器关闭
 func (s *server) OnStop(handler network.CloseHandler) {
 	s.stopHandler = handler
 }
@@ -111,10 +115,13 @@ func (s *server) OnReceive(handler network.ReceiveHandler) {
 // 启动服务器
 func (s *server) serve() {
 	for {
-		conn, err := s.listener.Accept()
+		conn, err := s.listener.AcceptKCP()
 		if err != nil {
+			fmt.Println("close")
 			return
 		}
+
+		fmt.Println(conn.GetConv())
 
 		if err := s.connMgr.allocate(conn); err != nil {
 			_ = conn.Close()
