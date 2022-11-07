@@ -9,9 +9,11 @@ package kcp
 
 import (
 	"crypto/sha1"
-	"fmt"
+	"github.com/dobyte/due/log"
 	"github.com/xtaci/kcp-go"
 	"golang.org/x/crypto/pbkdf2"
+	"net"
+	"time"
 
 	"github.com/dobyte/due/network"
 )
@@ -30,11 +32,7 @@ type server struct {
 var _ network.Server = &server{}
 
 func NewServer(opts ...ServerOption) network.Server {
-	o := &serverOptions{
-		addr:         ":3553",
-		maxConnNum:   5000,
-		maxMsgLength: 1024 * 1024,
-	}
+	o := defaultServerOptions()
 	for _, opt := range opts {
 		opt(o)
 	}
@@ -114,16 +112,32 @@ func (s *server) OnReceive(handler network.ReceiveHandler) {
 
 // 启动服务器
 func (s *server) serve() {
+	var tempDelay time.Duration
+
 	for {
 		conn, err := s.listener.AcceptKCP()
 		if err != nil {
-			fmt.Println("close")
+			if e, ok := err.(net.Error); ok && e.Temporary() {
+				if tempDelay == 0 {
+					tempDelay = 5 * time.Millisecond
+				} else {
+					tempDelay *= 2
+				}
+				if max := 1 * time.Second; tempDelay > max {
+					tempDelay = max
+				}
+
+				log.Warnf("kcp accept error: %v; retrying in %v", err, tempDelay)
+				time.Sleep(tempDelay)
+				continue
+			}
+
 			return
 		}
 
-		fmt.Println(conn.GetConv())
+		tempDelay = 0
 
-		if err := s.connMgr.allocate(conn); err != nil {
+		if err = s.connMgr.allocate(conn); err != nil {
 			_ = conn.Close()
 		}
 	}

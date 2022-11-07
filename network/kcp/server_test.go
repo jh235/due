@@ -10,6 +10,7 @@ package kcp_test
 import (
 	"github.com/dobyte/due/network/kcp"
 	"testing"
+	"time"
 
 	"github.com/dobyte/due/network"
 )
@@ -18,7 +19,8 @@ func TestServer(t *testing.T) {
 	server := kcp.NewServer(
 		kcp.WithServerListenAddr(":3553"),
 		kcp.WithServerMaxConnNum(5),
-		kcp.WithServerMaxMsgLength(10),
+		kcp.WithServerMaxMsgLen(10),
+		kcp.WithServerHeartbeatInterval(10*time.Second),
 	)
 	server.OnStart(func() {
 		t.Logf("server is started")

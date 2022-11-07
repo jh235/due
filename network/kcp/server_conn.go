@@ -1,24 +1,25 @@
 package kcp
 
 import (
-	"fmt"
 	"github.com/dobyte/due/internal/xnet"
 	"github.com/dobyte/due/log"
 	"github.com/dobyte/due/network"
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type serverConn struct {
-	rw      sync.RWMutex   // 锁
-	id      int64          // 连接ID
-	uid     int64          // 用户ID
-	state   int32          // 连接状态
-	conn    net.Conn       // WS源连接
-	connMgr *serverConnMgr // 连接管理
-	chWrite chan chWrite   // 写入队列
-	done    chan struct{}  // 写入完成信号
+	rw                sync.RWMutex      // 锁
+	id                int64             // 连接ID
+	uid               int64             // 用户ID
+	state             network.ConnState // 连接状态
+	conn              net.Conn          // UDP源连接
+	connMgr           *serverConnMgr    // 连接管理
+	chWrite           chan chWrite      // 写入队列
+	lastHeartbeatTime int64             // 上次心跳时间
+	done              chan struct{}     // 写入完成信号
 }
 
 var _ network.Conn = &serverConn{}
@@ -30,85 +31,61 @@ func (c *serverConn) ID() int64 {
 
 // UID 获取用户ID
 func (c *serverConn) UID() int64 {
-	c.rw.RLock()
-	defer c.rw.RUnlock()
-
-	return c.uid
+	return atomic.LoadInt64(&c.uid)
 }
 
 // Bind 绑定用户ID
 func (c *serverConn) Bind(uid int64) {
-	c.rw.Lock()
-	defer c.rw.Unlock()
+	atomic.StoreInt64(&c.uid, uid)
+}
 
-	c.uid = uid
+// Unbind 解绑用户ID
+func (c *serverConn) Unbind() {
+	atomic.StoreInt64(&c.uid, 0)
 }
 
 // Send 发送消息（同步）
-func (c *serverConn) Send(msg []byte, msgType ...int) error {
+func (c *serverConn) Send(msg []byte, msgType ...int) (err error) {
 	c.rw.RLock()
 	defer c.rw.RUnlock()
 
-	if err := c.checkState(); err != nil {
-		return err
+	if err = c.checkState(); err != nil {
+		return
 	}
 
-	_, err := c.conn.Write(msg)
+	_, err = c.conn.Write(msg)
 
-	return err
+	return
 }
 
 // Push 发送消息（异步）
-func (c *serverConn) Push(msg []byte, msgType ...int) error {
+func (c *serverConn) Push(msg []byte, msgType ...int) (err error) {
 	c.rw.RLock()
 	defer c.rw.RUnlock()
 
-	if err := c.checkState(); err != nil {
-		return err
+	if err = c.checkState(); err != nil {
+		return
 	}
 
 	c.chWrite <- chWrite{typ: dataPacket, msg: msg}
 
-	return nil
+	return
 }
 
 // State 获取连接状态
 func (c *serverConn) State() network.ConnState {
-	return network.ConnState(atomic.LoadInt32(&c.state))
+	c.rw.RLock()
+	defer c.rw.RUnlock()
+
+	return c.state
 }
 
 // Close 关闭连接
 func (c *serverConn) Close(isForce ...bool) error {
-	c.rw.Lock()
-	defer c.rw.Unlock()
-
-	if err := c.checkState(); err != nil {
-		return err
-	}
-
 	if len(isForce) > 0 && isForce[0] {
-		atomic.StoreInt32(&c.state, int32(network.ConnClosed))
+		return c.forceClose()
 	} else {
-		atomic.StoreInt32(&c.state, int32(network.ConnHanged))
-		c.chWrite <- chWrite{typ: closeSig}
-		<-c.done
-	}
-
-	close(c.chWrite)
-
-	err := c.conn.Close()
-	c.conn = nil
-	c.connMgr.recycle(c)
-
-	return err
-}
-
-// 关闭连接
-func (c *serverConn) close() {
-	atomic.StoreInt32(&c.state, int32(network.ConnClosed))
-
-	if c.connMgr.server.disconnectHandler != nil {
-		c.connMgr.server.disconnectHandler(c)
+		return c.graceClose()
 	}
 }
 
@@ -161,9 +138,10 @@ func (c *serverConn) init(conn net.Conn, cm *serverConnMgr) {
 	c.id = cm.id
 	c.conn = conn
 	c.connMgr = cm
+	c.state = network.ConnOpened
 	c.chWrite = make(chan chWrite, 256)
 	c.done = make(chan struct{})
-	atomic.StoreInt32(&c.state, int32(network.ConnOpened))
+	c.lastHeartbeatTime = time.Now().Unix()
 
 	if c.connMgr.server.connectHandler != nil {
 		c.connMgr.server.connectHandler(c)
@@ -176,7 +154,7 @@ func (c *serverConn) init(conn net.Conn, cm *serverConnMgr) {
 
 // 检测连接状态
 func (c *serverConn) checkState() error {
-	switch network.ConnState(atomic.LoadInt32(&c.state)) {
+	switch c.state {
 	case network.ConnHanged:
 		return network.ErrConnectionHanged
 	case network.ConnClosed:
@@ -188,19 +166,15 @@ func (c *serverConn) checkState() error {
 
 // 读取消息
 func (c *serverConn) read() {
-	defer c.close()
-
-	size := c.connMgr.server.opts.maxMsgLength + 1
-	buf := make([]byte, 9)
+	size := c.connMgr.server.opts.maxMsgLen + 1
+	msg := make([]byte, size)
 
 	for {
-		n, err := c.conn.Read(buf)
+		n, err := c.conn.Read(msg)
 		if err != nil {
-			fmt.Println("3333")
+			_ = c.forceClose()
 			return
 		}
-
-		fmt.Println(n)
 
 		if n >= size {
 			log.Warnf("the msg size too large, has been ignored")
@@ -214,14 +188,76 @@ func (c *serverConn) read() {
 			return
 		}
 
+		if len(msg) == 0 {
+			continue
+		}
+
 		if c.connMgr.server.receiveHandler != nil {
-			c.connMgr.server.receiveHandler(c, buf[:n], 0)
+			c.connMgr.server.receiveHandler(c, msg[:n], 0)
 		}
 	}
 }
 
+// 优雅关闭
+func (c *serverConn) graceClose() (err error) {
+	c.rw.Lock()
+
+	if err = c.checkState(); err != nil {
+		c.rw.Unlock()
+		return
+	}
+
+	c.state = network.ConnHanged
+	c.chWrite <- chWrite{typ: closeSig}
+	c.rw.Unlock()
+
+	<-c.done
+
+	c.rw.Lock()
+	c.state = network.ConnClosed
+	close(c.chWrite)
+	close(c.done)
+	err = c.conn.Close()
+	c.conn = nil
+	c.connMgr.recycle(c)
+	c.rw.Unlock()
+
+	if c.connMgr.server.disconnectHandler != nil {
+		c.connMgr.server.disconnectHandler(c)
+	}
+
+	return
+}
+
+// 强制关闭
+func (c *serverConn) forceClose() (err error) {
+	c.rw.Lock()
+
+	if err = c.checkState(); err != nil {
+		c.rw.Unlock()
+		return
+	}
+
+	c.state = network.ConnClosed
+	close(c.chWrite)
+	close(c.done)
+	err = c.conn.Close()
+	c.conn = nil
+	c.connMgr.recycle(c)
+	c.rw.Unlock()
+
+	if c.connMgr.server.disconnectHandler != nil {
+		c.connMgr.server.disconnectHandler(c)
+	}
+
+	return
+}
+
 // 写入消息
 func (c *serverConn) write() {
+	ticker := time.NewTicker(c.connMgr.server.opts.heartbeatCheckInterval)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case write, ok := <-c.chWrite:
@@ -234,9 +270,30 @@ func (c *serverConn) write() {
 				return
 			}
 
-			if _, err := c.conn.Write(write.msg); err != nil {
+			if err := c.doWrite(write.msg); err != nil {
 				log.Errorf("write message error: %v", err)
+			}
+		case <-ticker.C:
+			deadline := time.Now().Add(-2 * c.connMgr.server.opts.heartbeatCheckInterval).Unix()
+			if atomic.LoadInt64(&c.lastHeartbeatTime) < deadline {
+				log.Debugf("connection heartbeat timeout")
+				_ = c.Close(true)
+				return
 			}
 		}
 	}
+}
+
+// 写入消息
+func (c *serverConn) doWrite(buf []byte) (err error) {
+	c.rw.RLock()
+	defer c.rw.RUnlock()
+
+	if c.state == network.ConnClosed {
+		return
+	}
+
+	_, err = c.conn.Write(buf)
+
+	return
 }
