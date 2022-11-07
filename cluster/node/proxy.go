@@ -6,19 +6,14 @@ import (
 	"github.com/dobyte/due/cluster"
 	"github.com/dobyte/due/locate"
 	"github.com/dobyte/due/registry"
+	"github.com/dobyte/due/transport"
 	"sync"
 	"sync/atomic"
 
-	"golang.org/x/sync/errgroup"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/status"
-
-	"github.com/dobyte/due/cluster/internal/code"
-	"github.com/dobyte/due/cluster/internal/pb"
 	"github.com/dobyte/due/log"
 	"github.com/dobyte/due/router"
 	"github.com/dobyte/due/session"
+	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -27,9 +22,12 @@ var (
 	ErrInvalidSessionKind = errors.New("invalid session kind")
 	ErrNotFoundUserSource = errors.New("not found user source")
 	ErrReceiveTargetEmpty = errors.New("the receive target is empty")
+	ErrUnableLocateSource = errors.New("unable to locate source")
 )
 
 type Proxy interface {
+	// GetNID 获取当前节点ID
+	GetNID() string
 	// AddRouteHandler 添加路由处理器
 	AddRouteHandler(route int32, stateful bool, handler RouteHandler)
 	// SetDefaultRouteHandler 设置默认路由处理器，所有未注册的路由均走默认路由处理器
@@ -64,6 +62,8 @@ type Proxy interface {
 	Broadcast(ctx context.Context, args *BroadcastArgs) (int64, error)
 	// Disconnect 断开连接
 	Disconnect(ctx context.Context, args *DisconnectArgs) error
+	// Deliver 投递消息给节点处理
+	Deliver(ctx context.Context, args *DeliverArgs) error
 }
 
 type proxy struct {
@@ -74,6 +74,11 @@ type proxy struct {
 
 func newProxy(node *Node) *proxy {
 	return &proxy{node: node}
+}
+
+// GetNID 获取当前节点ID
+func (p *proxy) GetNID() string {
+	return p.node.opts.id
 }
 
 // AddRouteHandler 添加路由处理器
@@ -98,10 +103,8 @@ func (p *proxy) BindGate(ctx context.Context, gid string, cid, uid int64) error 
 		return err
 	}
 
-	if _, err = client.Bind(ctx, &pb.BindRequest{
-		CID: cid,
-		UID: uid,
-	}); err != nil {
+	_, err = client.Bind(ctx, cid, uid)
+	if err != nil {
 		return err
 	}
 
@@ -112,12 +115,9 @@ func (p *proxy) BindGate(ctx context.Context, gid string, cid, uid int64) error 
 
 // UnbindGate 解绑网关
 func (p *proxy) UnbindGate(ctx context.Context, uid int64) error {
-	_, err := p.doGateRPC(ctx, uid, func(client pb.GateClient) (bool, interface{}, error) {
-		reply, err := client.Unbind(ctx, &pb.UnbindRequest{
-			UID: uid,
-		})
-
-		return status.Code(err) == code.NotFoundSession, reply, err
+	_, err := p.doGateRPC(ctx, uid, func(client transport.GateClient) (bool, interface{}, error) {
+		miss, err := client.Unbind(ctx, uid)
+		return miss, nil, err
 	})
 	if err != nil {
 		return err
@@ -269,46 +269,33 @@ func (p *proxy) directGetIP(ctx context.Context, gid string, kind session.Kind, 
 		return "", err
 	}
 
-	reply, err := client.GetIP(ctx, &pb.GetIPRequest{
-		NID:    p.node.opts.id,
-		Kind:   int32(kind),
-		Target: target,
-	})
-	if err != nil {
-		return "", err
-	}
-
-	return reply.IP, nil
+	ip, _, err := client.GetIP(ctx, kind, target)
+	return ip, err
 }
 
 // 间接获取IP
 func (p *proxy) indirectGetIP(ctx context.Context, uid int64) (string, error) {
-	v, err := p.doGateRPC(ctx, uid, func(client pb.GateClient) (bool, interface{}, error) {
-		reply, err := client.GetIP(ctx, &pb.GetIPRequest{
-			NID:    p.node.opts.id,
-			Kind:   int32(session.User),
-			Target: uid,
-		})
-
-		return status.Code(err) == code.NotFoundSession, reply, err
+	v, err := p.doGateRPC(ctx, uid, func(client transport.GateClient) (bool, interface{}, error) {
+		ip, miss, err := client.GetIP(ctx, session.User, uid)
+		return miss, ip, err
 	})
 	if err != nil {
 		return "", err
 	}
 
-	return v.(*pb.GetIPReply).IP, nil
+	return v.(string), nil
 }
 
 // Push 推送消息
 func (p *proxy) Push(ctx context.Context, args *PushArgs) error {
 	switch args.Kind {
 	case session.Conn:
-		return p.directPush(ctx, args.GID, args.Kind, args.Target, args.Message)
+		return p.directPush(ctx, args)
 	case session.User:
 		if args.GID == "" {
-			return p.indirectPush(ctx, args.Target, args.Message)
+			return p.indirectPush(ctx, args)
 		} else {
-			return p.directPush(ctx, args.GID, args.Kind, args.Target, args.Message)
+			return p.directPush(ctx, args)
 		}
 	default:
 		return ErrInvalidSessionKind
@@ -316,51 +303,39 @@ func (p *proxy) Push(ctx context.Context, args *PushArgs) error {
 }
 
 // 直接推送
-func (p *proxy) directPush(ctx context.Context, gid string, kind session.Kind, target int64, message *Message) error {
-	buffer, err := p.toBuffer(message.Data)
+func (p *proxy) directPush(ctx context.Context, args *PushArgs) error {
+	buffer, err := p.toBuffer(args.Message.Data, true)
 	if err != nil {
 		return err
 	}
 
-	client, err := p.getGateClientByGID(gid)
+	client, err := p.getGateClientByGID(args.GID)
 	if err != nil {
 		return err
 	}
 
-	_, err = client.Push(ctx, &pb.PushRequest{
-		NID:    p.node.opts.id,
-		Kind:   int32(kind),
-		Target: target,
-		Message: &pb.Message{
-			Seq:    message.Seq,
-			Route:  message.Route,
-			Buffer: buffer,
-		},
+	_, err = client.Push(ctx, args.Kind, args.Target, &transport.Message{
+		Seq:    args.Message.Seq,
+		Route:  args.Message.Route,
+		Buffer: buffer,
 	})
-
 	return err
 }
 
 // 间接推送
-func (p *proxy) indirectPush(ctx context.Context, uid int64, message *Message) error {
-	buffer, err := p.toBuffer(message.Data)
+func (p *proxy) indirectPush(ctx context.Context, args *PushArgs) error {
+	buffer, err := p.toBuffer(args.Message.Data, true)
 	if err != nil {
 		return err
 	}
 
-	_, err = p.doGateRPC(ctx, uid, func(client pb.GateClient) (bool, interface{}, error) {
-		reply, err := client.Push(ctx, &pb.PushRequest{
-			NID:    p.node.opts.id,
-			Kind:   int32(session.User),
-			Target: uid,
-			Message: &pb.Message{
-				Seq:    message.Seq,
-				Route:  message.Route,
-				Buffer: buffer,
-			},
+	_, err = p.doGateRPC(ctx, args.Target, func(client transport.GateClient) (bool, interface{}, error) {
+		miss, err := client.Push(ctx, session.User, args.Target, &transport.Message{
+			Seq:    args.Message.Seq,
+			Route:  args.Message.Route,
+			Buffer: buffer,
 		})
-
-		return status.Code(err) == code.NotFoundSession, reply, err
+		return miss, nil, err
 	})
 
 	return err
@@ -368,23 +343,43 @@ func (p *proxy) indirectPush(ctx context.Context, uid int64, message *Message) e
 
 // Response 响应消息
 func (p *proxy) Response(ctx context.Context, req Request, message interface{}) error {
-	return p.directPush(ctx, req.GID(), session.Conn, req.CID(), &Message{
-		Seq:   req.Seq(),
-		Route: req.Route(),
-		Data:  message,
-	})
+	switch {
+	case req.GID() != "":
+		return p.directPush(ctx, &PushArgs{
+			GID:    req.GID(),
+			Kind:   session.Conn,
+			Target: req.CID(),
+			Message: &Message{
+				Seq:   req.Seq(),
+				Route: req.Route(),
+				Data:  message,
+			},
+		})
+	case req.NID() != "":
+		return p.directDeliver(ctx, &DeliverArgs{
+			NID: req.NID(),
+			UID: req.UID(),
+			Message: &Message{
+				Seq:   req.Seq(),
+				Route: req.Route(),
+				Data:  message,
+			},
+		})
+	default:
+		return ErrUnableLocateSource
+	}
 }
 
 // Multicast 推送组播消息
 func (p *proxy) Multicast(ctx context.Context, args *MulticastArgs) (int64, error) {
 	switch args.Kind {
 	case session.Conn:
-		return p.directMulticast(ctx, args.GID, args.Kind, args.Targets, args.Message)
+		return p.directMulticast(ctx, args)
 	case session.User:
 		if args.GID == "" {
-			return p.indirectMulticast(ctx, args.Targets, args.Message)
+			return p.indirectMulticast(ctx, args)
 		} else {
-			return p.directMulticast(ctx, args.GID, args.Kind, args.Targets, args.Message)
+			return p.directMulticast(ctx, args)
 		}
 	default:
 		return 0, ErrInvalidSessionKind
@@ -392,66 +387,70 @@ func (p *proxy) Multicast(ctx context.Context, args *MulticastArgs) (int64, erro
 }
 
 // 直接推送组播消息，只能推送到同一个网关服务器上
-func (p *proxy) directMulticast(ctx context.Context, gid string, kind session.Kind, targets []int64, message *Message) (int64, error) {
-	if len(targets) == 0 {
+func (p *proxy) directMulticast(ctx context.Context, args *MulticastArgs) (int64, error) {
+	if len(args.Targets) == 0 {
 		return 0, ErrReceiveTargetEmpty
 	}
 
-	buffer, err := p.toBuffer(message.Data)
+	buffer, err := p.toBuffer(args.Message.Data, true)
 	if err != nil {
 		return 0, err
 	}
 
-	client, err := p.getGateClientByGID(gid)
+	client, err := p.getGateClientByGID(args.GID)
 	if err != nil {
 		return 0, err
 	}
 
-	reply, err := client.Multicast(ctx, &pb.MulticastRequest{
-		NID:     p.node.opts.id,
-		Kind:    int32(kind),
-		Targets: targets,
-		Message: &pb.Message{
-			Seq:    message.Seq,
-			Route:  message.Route,
-			Buffer: buffer,
-		},
+	return client.Multicast(ctx, args.Kind, args.Targets, &transport.Message{
+		Seq:    args.Message.Seq,
+		Route:  args.Message.Route,
+		Buffer: buffer,
 	})
-	if err != nil {
-		return 0, err
-	}
-
-	return reply.Total, nil
 }
 
 // 间接推送组播消息
-func (p *proxy) indirectMulticast(ctx context.Context, uids []int64, message *Message) (int64, error) {
-	total := int64(0)
-	eg, ctx := errgroup.WithContext(ctx)
-
-	for _, target := range uids {
-		uid := target
-		eg.Go(func() error {
-			if err := p.indirectPush(ctx, uid, message); err != nil {
-				return err
-			}
-			atomic.AddInt64(&total, 1)
-
-			return nil
-		})
+func (p *proxy) indirectMulticast(ctx context.Context, args *MulticastArgs) (int64, error) {
+	buffer, err := p.toBuffer(args.Message.Data, true)
+	if err != nil {
+		return 0, err
 	}
 
-	err := eg.Wait()
+	total := int64(0)
+	eg, ctx := errgroup.WithContext(ctx)
+	for _, target := range args.Targets {
+		func(target int64) {
+			eg.Go(func() error {
+				_, err := p.doGateRPC(ctx, target, func(client transport.GateClient) (bool, interface{}, error) {
+					miss, err := client.Push(ctx, session.User, target, &transport.Message{
+						Seq:    args.Message.Seq,
+						Route:  args.Message.Route,
+						Buffer: buffer,
+					})
+					return miss, nil, err
+				})
+				if err != nil {
+					return err
+				}
+
+				atomic.AddInt64(&total, 1)
+				return nil
+			})
+		}(target)
+	}
+
+	err = eg.Wait()
 
 	if total > 0 {
 		return total, nil
 	}
+
 	return 0, err
 }
 
 // Broadcast 推送广播消息
 func (p *proxy) Broadcast(ctx context.Context, args *BroadcastArgs) (int64, error) {
-	buffer, err := p.toBuffer(args.Message)
+	buffer, err := p.toBuffer(args.Message.Data, true)
 	if err != nil {
 		return 0, err
 	}
@@ -460,25 +459,21 @@ func (p *proxy) Broadcast(ctx context.Context, args *BroadcastArgs) (int64, erro
 	eg, ctx := errgroup.WithContext(ctx)
 	p.node.router.RangeGateEndpoint(func(insID string, ep *router.Endpoint) bool {
 		eg.Go(func() error {
-			client, err := p.newGateClient(ep)
+			client, err := p.node.opts.transporter.NewGateClient(ep)
 			if err != nil {
 				return err
 			}
 
-			reply, err := client.Broadcast(ctx, &pb.BroadcastRequest{
-				NID:  p.node.opts.id,
-				Kind: int32(args.Kind),
-				Message: &pb.Message{
-					Seq:    args.Message.Seq,
-					Route:  args.Message.Route,
-					Buffer: buffer,
-				},
+			n, err := client.Broadcast(ctx, args.Kind, &transport.Message{
+				Seq:    args.Message.Seq,
+				Route:  args.Message.Route,
+				Buffer: buffer,
 			})
 			if err != nil {
 				return err
 			}
 
-			atomic.AddInt64(&total, reply.Total)
+			atomic.AddInt64(&total, n)
 
 			return nil
 		})
@@ -491,6 +486,7 @@ func (p *proxy) Broadcast(ctx context.Context, args *BroadcastArgs) (int64, erro
 	if total > 0 {
 		return total, nil
 	}
+
 	return total, err
 }
 
@@ -498,12 +494,12 @@ func (p *proxy) Broadcast(ctx context.Context, args *BroadcastArgs) (int64, erro
 func (p *proxy) Disconnect(ctx context.Context, args *DisconnectArgs) error {
 	switch args.Kind {
 	case session.Conn:
-		return p.directDisconnect(ctx, args.GID, args.Kind, args.Target)
+		return p.directDisconnect(ctx, args.GID, args.Kind, args.Target, args.IsForce)
 	case session.User:
 		if args.GID == "" {
-			return p.indirectDisconnect(ctx, args.Target)
+			return p.indirectDisconnect(ctx, args.Target, args.IsForce)
 		} else {
-			return p.directDisconnect(ctx, args.GID, args.Kind, args.Target)
+			return p.directDisconnect(ctx, args.GID, args.Kind, args.Target, args.IsForce)
 		}
 	default:
 		return ErrInvalidSessionKind
@@ -511,98 +507,111 @@ func (p *proxy) Disconnect(ctx context.Context, args *DisconnectArgs) error {
 }
 
 // 直接断开连接
-func (p *proxy) directDisconnect(ctx context.Context, gid string, kind session.Kind, target int64) error {
+func (p *proxy) directDisconnect(ctx context.Context, gid string, kind session.Kind, target int64, isForce bool) error {
 	client, err := p.getGateClientByGID(gid)
 	if err != nil {
 		return err
 	}
 
-	_, err = client.Disconnect(ctx, &pb.DisconnectRequest{
-		NID:    p.node.opts.id,
-		Kind:   int32(kind),
-		Target: target,
-	})
-
+	_, err = client.Disconnect(ctx, kind, target, isForce)
 	return err
 }
 
 // 间接断开连接
-func (p *proxy) indirectDisconnect(ctx context.Context, uid int64) error {
-	_, err := p.doGateRPC(ctx, uid, func(client pb.GateClient) (bool, interface{}, error) {
-		reply, err := client.Disconnect(ctx, &pb.DisconnectRequest{
-			NID:    p.node.opts.id,
-			Kind:   int32(session.User),
-			Target: uid,
-		})
-
-		return status.Code(err) == code.NotFoundSession, reply, err
+func (p *proxy) indirectDisconnect(ctx context.Context, uid int64, isForce bool) error {
+	_, err := p.doGateRPC(ctx, uid, func(client transport.GateClient) (bool, interface{}, error) {
+		miss, err := client.Disconnect(ctx, session.User, uid, isForce)
+		return miss, nil, err
 	})
 
 	return err
 }
 
-//// Deliver 投递消息给当前节点处理
-//func (p *proxy) Deliver(ctx context.Context, args *DeliverArgs) error {
-//	var (
-//		err       error
-//		insID     string
-//		lastInsID string
-//		client    pb.GateClient
-//		continued bool
-//		reply     interface{}
-//	)
-//
-//	for i := 0; i < 2; i++ {
-//		if insID, err = p.LocateGate(ctx, args.UID); err != nil {
-//			return err
-//		}
-//
-//		if insID == lastInsID {
-//			return reply, err
-//		}
-//
-//		lastInsID = insID
-//
-//		if client, err = p.getGateClientByGID(insID); err != nil {
-//			return nil, err
-//		}
-//
-//		if continued, reply, err = fn(client); continued {
-//			p.sourceGate.Delete(uid)
-//			continue
-//		}
-//
-//		break
-//	}
-//
-//	return reply, err
-//
-//	p.node.chRead <- wrap{route: args.Route, request: &request{
-//		gid:   args.GID,
-//		nid:   args.NID,
-//		cid:   args.CID,
-//		uid:   args.UID,
-//		msg:   args.Message,
-//		codec: p.node.opts.codec,
-//	}}
-//}
+// Deliver 投递消息给节点处理
+func (p *proxy) Deliver(ctx context.Context, args *DeliverArgs) error {
+	switch {
+	case args.NID == p.node.opts.id:
+		p.node.deliverRequest(&request{
+			nid:   p.node.opts.id,
+			uid:   args.UID,
+			node:  p.node,
+			seq:   args.Message.Seq,
+			route: args.Message.Route,
+			data:  args.Message.Data,
+		})
+		return nil
+	case args.NID != "":
+		return p.directDeliver(ctx, args)
+	default:
+		return p.indirectDeliver(ctx, args)
+	}
+}
+
+// 直接投递
+func (p *proxy) directDeliver(ctx context.Context, args *DeliverArgs) error {
+	buffer, err := p.toBuffer(args.Message.Data, false)
+	if err != nil {
+		return err
+	}
+
+	client, err := p.getNodeClientByNID(args.NID)
+	if err != nil {
+		return err
+	}
+
+	_, err = client.Deliver(ctx, "", p.node.opts.id, 0, args.UID, &transport.Message{
+		Seq:    args.Message.Seq,
+		Route:  args.Message.Route,
+		Buffer: buffer,
+	})
+
+	return err
+}
+
+// 间接投递
+func (p *proxy) indirectDeliver(ctx context.Context, args *DeliverArgs) error {
+	buffer, err := p.toBuffer(args.Message.Data, false)
+	if err != nil {
+		return err
+	}
+
+	_, err = p.doNodeRPC(ctx, args.Message.Route, args.UID, func(ctx context.Context, client transport.NodeClient) (bool, interface{}, error) {
+		miss, err := client.Deliver(ctx, "", p.node.opts.id, 0, args.UID, &transport.Message{
+			Seq:    args.Message.Seq,
+			Route:  args.Message.Route,
+			Buffer: buffer,
+		})
+		return miss, nil, err
+	})
+
+	return err
+}
 
 // 消息转buffer
-func (p *proxy) toBuffer(message interface{}) ([]byte, error) {
+func (p *proxy) toBuffer(message interface{}, encrypt bool) ([]byte, error) {
 	if v, ok := message.([]byte); ok {
 		return v, nil
 	}
 
-	return p.node.opts.codec.Marshal(message)
+	data, err := p.node.opts.codec.Marshal(message)
+	if err != nil {
+		return nil, err
+	}
+
+	if encrypt && p.node.opts.encryptor != nil {
+		return p.node.opts.encryptor.Encrypt(data)
+	}
+
+	return data, nil
 }
 
 // 执行RPC调用
-func (p *proxy) doGateRPC(ctx context.Context, uid int64, fn func(client pb.GateClient) (bool, interface{}, error)) (interface{}, error) {
+func (p *proxy) doGateRPC(ctx context.Context, uid int64, fn func(client transport.GateClient) (bool, interface{}, error)) (interface{}, error) {
 	var (
 		err       error
 		gid       string
 		lastGID   string
-		client    pb.GateClient
+		client    transport.GateClient
 		continued bool
 		reply     interface{}
 	)
@@ -618,11 +627,13 @@ func (p *proxy) doGateRPC(ctx context.Context, uid int64, fn func(client pb.Gate
 
 		lastGID = gid
 
-		if client, err = p.getGateClientByGID(gid); err != nil {
+		client, err = p.getGateClientByGID(gid)
+		if err != nil {
 			return nil, err
 		}
 
-		if continued, reply, err = fn(client); continued {
+		continued, reply, err = fn(client)
+		if continued {
 			p.sourceGate.Delete(uid)
 			continue
 		}
@@ -634,32 +645,45 @@ func (p *proxy) doGateRPC(ctx context.Context, uid int64, fn func(client pb.Gate
 }
 
 // 执行RPC调用
-func (p *proxy) doNodeRPC(ctx context.Context, route int32, uid int64, fn func(client pb.NodeClient) (bool, interface{}, error)) (interface{}, error) {
+func (p *proxy) doNodeRPC(ctx context.Context, route int32, uid int64, fn func(ctx context.Context, client transport.NodeClient) (bool, interface{}, error)) (interface{}, error) {
 	var (
 		err       error
 		nid       string
-		lastNID   string
-		client    pb.NodeClient
+		prev      string
+		client    transport.NodeClient
+		entity    *router.Route
+		ep        *router.Endpoint
 		continued bool
 		reply     interface{}
 	)
 
+	if entity, err = p.node.router.FindNodeRoute(route); err != nil {
+		return nil, err
+	}
+
 	for i := 0; i < 2; i++ {
-		if nid, err = p.LocateNode(ctx, uid); err != nil {
+		if entity.Stateful() {
+			if nid, err = p.LocateNode(ctx, uid); err != nil {
+				return nil, err
+			}
+			if nid == prev {
+				return reply, err
+			}
+			prev = nid
+		}
+
+		ep, err = entity.FindEndpoint(nid)
+		if err != nil {
 			return nil, err
 		}
 
-		if nid == lastNID {
-			return reply, err
-		}
-
-		lastNID = nid
-
-		if client, err = p.getNodeClientByNID(route, nid); err != nil {
+		client, err = p.node.opts.transporter.NewNodeClient(ep)
+		if err != nil {
 			return nil, err
 		}
 
-		if continued, reply, err = fn(client); continued {
+		continued, reply, err = fn(ctx, client)
+		if continued {
 			p.sourceNode.Delete(uid)
 			continue
 		}
@@ -671,7 +695,7 @@ func (p *proxy) doNodeRPC(ctx context.Context, route int32, uid int64, fn func(c
 }
 
 // 根据实例ID获取网关客户端
-func (p *proxy) getGateClientByGID(gid string) (pb.GateClient, error) {
+func (p *proxy) getGateClientByGID(gid string) (transport.GateClient, error) {
 	if gid == "" {
 		return nil, ErrInvalidGID
 	}
@@ -681,46 +705,21 @@ func (p *proxy) getGateClientByGID(gid string) (pb.GateClient, error) {
 		return nil, err
 	}
 
-	return p.newGateClient(ep)
-}
-
-// 新建节点RPC客户端
-func (p *proxy) newGateClient(ep *router.Endpoint) (pb.GateClient, error) {
-	conn, err := grpc.Dial(ep.Address(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return nil, err
-	}
-
-	return pb.NewGateClient(conn), nil
+	return p.node.opts.transporter.NewGateClient(ep)
 }
 
 // 根据实例ID获取节点客户端
-func (p *proxy) getNodeClientByNID(route int32, nid string) (pb.NodeClient, error) {
+func (p *proxy) getNodeClientByNID(nid string) (transport.NodeClient, error) {
 	if nid == "" {
 		return nil, ErrInvalidNID
 	}
 
-	entity, err := p.node.router.FindNodeRoute(route)
+	ep, err := p.node.router.FindNodeEndpoint(nid)
 	if err != nil {
 		return nil, err
 	}
 
-	ep, err := entity.FindEndpoint(nid)
-	if err != nil {
-		return nil, err
-	}
-
-	return p.newNodeClient(ep)
-}
-
-// 新建节点RPC客户端
-func (p *proxy) newNodeClient(ep *router.Endpoint) (pb.NodeClient, error) {
-	conn, err := grpc.Dial(ep.Address(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return nil, err
-	}
-
-	return pb.NewNodeClient(conn), nil
+	return p.node.opts.transporter.NewNodeClient(ep)
 }
 
 // 启动代理

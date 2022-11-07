@@ -7,7 +7,9 @@
 
 package encoding
 
-import "fmt"
+import (
+	"github.com/dobyte/due/log"
+)
 
 type Codec interface {
 	// Name 编解码器类型
@@ -23,11 +25,15 @@ var codecs = make(map[string]Codec)
 // Register 注册编解码器
 func Register(codec Codec) {
 	if codec == nil {
-		panic("can't register a invalid codec")
+		log.Fatal("can't register a invalid codec")
 	}
 
 	if codec.Name() == "" {
-		panic("can't register a codec without a name")
+		log.Fatal("can't register a codec without name")
+	}
+
+	if _, ok := codecs[codec.Name()]; ok {
+		log.Warnf("the old %s codec will be overwritten", codec.Name())
 	}
 
 	codecs[codec.Name()] = codec
@@ -37,7 +43,7 @@ func Register(codec Codec) {
 func Invoke(name string) Codec {
 	codec, ok := codecs[name]
 	if !ok {
-		panic(fmt.Sprintf("%s codec is not registered", name))
+		log.Fatalf("%s codec is not registered", name)
 	}
 
 	return codec

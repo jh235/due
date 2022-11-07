@@ -1,6 +1,26 @@
 package packet
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"github.com/dobyte/due/config"
+	"strings"
+)
+
+const (
+	littleEndian = "little"
+	bigEndian    = "big"
+)
+
+const (
+	defaultSeqBytesLen   = 2
+	defaultRouteBytesLen = 2
+)
+
+const (
+	defaultEndianKey        = "config.packet.endian"
+	defaultSeqBytesLenKey   = "config.packet.seqBytesLen"
+	defaultRouteBytesLenKey = "config.packet.seqBytesLen"
+)
 
 type options struct {
 	// 字节序
@@ -17,6 +37,24 @@ type options struct {
 }
 
 type Option func(o *options)
+
+func defaultOptions() *options {
+	opts := &options{
+		byteOrder:     binary.LittleEndian,
+		seqBytesLen:   config.Get(defaultSeqBytesLenKey, defaultSeqBytesLen).Int(),
+		routeBytesLen: config.Get(defaultRouteBytesLenKey, defaultRouteBytesLen).Int(),
+	}
+
+	endian := config.Get(defaultEndianKey).String()
+	switch strings.ToLower(endian) {
+	case littleEndian:
+		opts.byteOrder = binary.LittleEndian
+	case bigEndian:
+		opts.byteOrder = binary.BigEndian
+	}
+
+	return opts
+}
 
 // WithByteOrder 设置字节序
 func WithByteOrder(byteOrder binary.ByteOrder) Option {
