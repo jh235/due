@@ -1,10 +1,10 @@
 package grpc
 
 import (
+	endpointpkg "github.com/dobyte/due/internal/endpoint"
 	"github.com/dobyte/due/router"
 	"github.com/dobyte/due/transport"
 	"github.com/dobyte/due/transport/grpc/gate"
-	"github.com/dobyte/due/transport/grpc/internal/client"
 	"github.com/dobyte/due/transport/grpc/internal/server"
 	"github.com/dobyte/due/transport/grpc/node"
 )
@@ -20,6 +20,19 @@ func NewTransporter(opts ...Option) *Transporter {
 	}
 
 	return &Transporter{opts: o}
+}
+
+func (t *Transporter) NewServer() (transport.Server, error) {
+	return NewServer(&Options{
+		Addr:       t.opts.server.addr,
+		KeyFile:    t.opts.server.keyFile,
+		CertFile:   t.opts.server.certFile,
+		ServerOpts: t.opts.server.serverOpts,
+	})
+}
+
+func (t *Transporter) NewClient(ep *endpointpkg.Endpoint) (transport.Client, error) {
+
 }
 
 // NewGateClient 新建网关客户端

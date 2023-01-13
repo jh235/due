@@ -36,6 +36,7 @@ type Node struct {
 	chRequest           chan *request
 	routes              map[int32]routeEntity
 	events              map[cluster.Event]EventHandler
+	providers           []interface{}
 	defaultRouteHandler RouteHandler
 	proxy               *proxy
 	instance            *registry.ServiceInstance
@@ -224,7 +225,7 @@ func (n *Node) addRouteHandler(route int32, stateful bool, handler RouteHandler)
 			handler:  handler,
 		}
 	} else {
-		log.Warnf("the node server is working, can't add route handler")
+		log.Warnf("the node server is shutdown, can't add route handler")
 	}
 }
 
@@ -233,7 +234,7 @@ func (n *Node) setDefaultRouteHandler(handler RouteHandler) {
 	if n.state == cluster.Shut {
 		n.defaultRouteHandler = handler
 	} else {
-		log.Warnf("the node server is working, can't set default route handler")
+		log.Warnf("the node server is shutdown, can't set default route handler")
 	}
 }
 
@@ -247,11 +248,20 @@ func (n *Node) checkRouteStateful(route int32) (bool, bool) {
 }
 
 // 添加事件处理器
-func (n *Node) addEventListener(event cluster.Event, handler EventHandler) {
+func (n *Node) addEventHandler(event cluster.Event, handler EventHandler) {
 	if n.state == cluster.Shut {
 		n.events[event] = handler
 	} else {
-		log.Warnf("the node server is working, can't add event handler")
+		log.Warnf("the node server is shutdown, can't add event handler")
+	}
+}
+
+// 添加服务提供者
+func (n *Node) addServiceProvider(providers ...interface{}) {
+	if n.state == cluster.Shut {
+		n.providers = append(n.providers, providers...)
+	} else {
+		log.Warnf("the node server is shutdown, can't add service provider")
 	}
 }
 

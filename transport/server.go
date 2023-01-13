@@ -3,23 +3,9 @@ package transport
 import (
 	"context"
 	"github.com/dobyte/due/cluster"
-	"github.com/dobyte/due/internal/endpoint"
 	"github.com/dobyte/due/packet"
 	"github.com/dobyte/due/session"
 )
-
-type Server interface {
-	// Addr 监听地址
-	Addr() string
-	// Scheme 协议
-	Scheme() string
-	// Endpoint 服务端口
-	Endpoint() *endpoint.Endpoint
-	// Start 启动服务器
-	Start() error
-	// Stop 停止服务器
-	Stop() error
-}
 
 type GateProvider interface {
 	// Bind 绑定用户与网关间的关系

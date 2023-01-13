@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+option go_package = "./pb";
+
+package pb;
+
+service Cluster {
+  // 调用
+  rpc Invoke(InvokeRequest) returns (InvokeReply) {}
+}
+
+enum Encoding {
+  Json = 0;
+  Proto = 1;
+}
+
+message InvokeRequest {
+  string Path = 1;
+  Encoding Encoding = 2;
+  bytes Arguments = 3;
+}
+
+message InvokeReply {
+  Encoding Encoding = 1;
+  bytes Reply = 2;
+}

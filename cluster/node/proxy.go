@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/dobyte/due/cluster"
 	"github.com/dobyte/due/internal/link"
+	"github.com/dobyte/due/internal/service"
 	"github.com/dobyte/due/registry"
 	"github.com/dobyte/due/session"
 )
@@ -38,12 +39,14 @@ type Proxy interface {
 	GetID() string
 	// GetName 获取当前节点名称
 	GetName() string
-	// AddRouteHandler 添加路由处理器
-	AddRouteHandler(route int32, stateful bool, handler RouteHandler)
 	// SetDefaultRouteHandler 设置默认路由处理器，所有未注册的路由均走默认路由处理器
 	SetDefaultRouteHandler(handler RouteHandler)
+	// AddRouteHandler 添加路由处理器
+	AddRouteHandler(route int32, stateful bool, handler RouteHandler)
 	// AddEventListener 添加事件监听器
 	AddEventListener(event cluster.Event, handler EventHandler)
+	// AddServiceProvider 添加服务提供者
+	AddServiceProvider(providers ...interface{}) error
 	// BindGate 绑定网关
 	BindGate(ctx context.Context, gid string, cid, uid int64) error
 	// UnbindGate 绑定网关
@@ -102,19 +105,33 @@ func (p *proxy) GetName() string {
 	return p.node.opts.name
 }
 
-// AddRouteHandler 添加路由处理器
-func (p *proxy) AddRouteHandler(route int32, stateful bool, handler RouteHandler) {
-	p.node.addRouteHandler(route, stateful, handler)
-}
-
 // SetDefaultRouteHandler 设置默认路由处理器，所有未注册的路由均走默认路由处理器
 func (p *proxy) SetDefaultRouteHandler(handler RouteHandler) {
 	p.node.setDefaultRouteHandler(handler)
 }
 
+// AddRouteHandler 添加路由处理器
+func (p *proxy) AddRouteHandler(route int32, stateful bool, handler RouteHandler) {
+	p.node.addRouteHandler(route, stateful, handler)
+}
+
 // AddEventListener 添加事件监听器
 func (p *proxy) AddEventListener(event cluster.Event, handler EventHandler) {
-	p.node.addEventListener(event, handler)
+	p.node.addEventHandler(event, handler)
+}
+
+// AddServiceProvider 添加服务提供者
+func (p *proxy) AddServiceProvider(providers ...interface{}) error {
+	for _, provider := range providers {
+		_, err := service.ParseServiceProvider(provider)
+		if err != nil {
+			return err
+		}
+	}
+
+	p.node.addServiceProvider(providers...)
+
+	return nil
 }
 
 // BindGate 绑定网关
