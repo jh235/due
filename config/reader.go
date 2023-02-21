@@ -1,15 +1,15 @@
 package config
 
 import (
-	"bytes"
 	"context"
-	"encoding/gob"
 	"github.com/dobyte/due/errors"
 	"github.com/dobyte/due/internal/value"
 	"github.com/imdario/mergo"
+	"github.com/jinzhu/copier"
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -24,15 +24,11 @@ type Reader interface {
 	Close()
 }
 
-func init() {
-	gob.Register(map[string]interface{}{})
-	gob.Register([]interface{}{})
-}
-
 type defaultReader struct {
 	opts   *options
 	ctx    context.Context
 	cancel context.CancelFunc
+	mu     sync.Mutex
 	values atomic.Value
 }
 
@@ -62,13 +58,15 @@ func (r *defaultReader) init() {
 	for _, s := range r.opts.sources {
 		cs, err := s.Load()
 		if err != nil {
-			log.Fatalf("load configure failed: %v", err)
+			log.Printf("load configure failed: %v", err)
+			continue
 		}
 
 		for _, c := range cs {
 			v, err := r.opts.decoder(c)
 			if err != nil {
-				log.Fatalf("decode configure failed: %v", err)
+				log.Printf("decode configure failed: %v", err)
+				continue
 			}
 
 			values[c.Name] = v
@@ -83,7 +81,8 @@ func (r *defaultReader) watch() {
 	for _, s := range r.opts.sources {
 		watcher, err := s.Watch(r.ctx)
 		if err != nil {
-			log.Fatalf("watching configure change failed: %v", err)
+			log.Printf("watching configure change failed: %v", err)
+			continue
 		}
 
 		go func() {
@@ -110,17 +109,22 @@ func (r *defaultReader) watch() {
 					values[c.Name] = v
 				}
 
-				dst, err := r.copyValues()
-				if err != nil {
-					continue
-				}
+				func() {
+					r.mu.Lock()
+					defer r.mu.Unlock()
 
-				err = mergo.Merge(&dst, values, mergo.WithOverride)
-				if err != nil {
-					continue
-				}
+					dst, err := r.copyValues()
+					if err != nil {
+						return
+					}
 
-				r.values.Store(dst)
+					err = mergo.Merge(&dst, values, mergo.WithOverride)
+					if err != nil {
+						return
+					}
+
+					r.values.Store(dst)
+				}()
 			}
 		}()
 	}
@@ -226,6 +230,9 @@ NOTFOUND:
 
 // Set 设置配置值
 func (r *defaultReader) Set(pattern string, value interface{}) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	var (
 		keys = strings.Split(pattern, ".")
 		node interface{}
@@ -326,19 +333,16 @@ func (r *defaultReader) Set(pattern string, value interface{}) error {
 }
 
 func (r *defaultReader) copyValues() (map[string]interface{}, error) {
-	var buf bytes.Buffer
-	enc := gob.NewEncoder(&buf)
-	dec := gob.NewDecoder(&buf)
-	err := enc.Encode(r.values.Load())
+	dst := make(map[string]interface{})
+
+	err := copier.CopyWithOption(&dst, r.values.Load(), copier.Option{
+		DeepCopy: true,
+	})
 	if err != nil {
 		return nil, err
 	}
-	var dest map[string]interface{}
-	err = dec.Decode(&dest)
-	if err != nil {
-		return nil, err
-	}
-	return dest, nil
+
+	return dst, nil
 }
 
 func reviseKeys(keys []string, values map[string]interface{}) []string {

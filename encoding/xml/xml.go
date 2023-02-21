@@ -2,16 +2,11 @@ package xml
 
 import (
 	"encoding/xml"
-	"github.com/dobyte/due/encoding"
 )
 
 const Name = "xml"
 
-var _ encoding.Codec = &codec{}
-
-func init() {
-	encoding.Register(&codec{})
-}
+var DefaultCodec = &codec{}
 
 type codec struct{}
 
@@ -28,4 +23,14 @@ func (codec) Marshal(v interface{}) ([]byte, error) {
 // Unmarshal 解码
 func (codec) Unmarshal(data []byte, v interface{}) error {
 	return xml.Unmarshal(data, v)
+}
+
+// Marshal 编码
+func Marshal(v interface{}) ([]byte, error) {
+	return DefaultCodec.Marshal(v)
+}
+
+// Unmarshal 解码
+func Unmarshal(data []byte, v interface{}) error {
+	return DefaultCodec.Unmarshal(data, v)
 }

@@ -24,8 +24,8 @@ func TestConfig(t *testing.T) {
 	//		t.Log(config.Get("wechat.1.db", 0))
 	//	case <-ticker2.C:
 	//		config.Close()
-	//		ticker1.Stop()
-	//		ticker2.Stop()
+	//		ticker1.Close()
+	//		ticker2.Close()
 	//		return
 	//	}
 	//}
@@ -36,4 +36,12 @@ func TestConfig(t *testing.T) {
 	//t.Log(v)
 	//
 	//select {}
+}
+
+func BenchmarkGet(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		config.Get("config").Map()
+	}
+
+	//b.Logf("%+v", config.Get("config").Map())
 }

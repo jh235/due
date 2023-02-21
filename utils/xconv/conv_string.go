@@ -1,8 +1,8 @@
 package xconv
 
 import (
-	"encoding/json"
 	"fmt"
+	"github.com/dobyte/due/encoding/json"
 	"reflect"
 	"strconv"
 	"time"
@@ -331,4 +331,14 @@ func Strings(any interface{}) (slice []string) {
 	}
 
 	return
+}
+
+func StringPointer(any interface{}) *string {
+	v := String(any)
+	return &v
+}
+
+func StringsPointer(any interface{}) *[]string {
+	v := Strings(any)
+	return &v
 }

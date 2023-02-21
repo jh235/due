@@ -9,7 +9,6 @@ import (
 	"github.com/dobyte/due/registry"
 	"github.com/dobyte/due/transport"
 	"github.com/dobyte/due/utils/xuuid"
-	"strings"
 	"time"
 )
 
@@ -20,12 +19,12 @@ const (
 )
 
 const (
-	defaultIDKey        = "config.node.id"
-	defaultNameKey      = "config.node.name"
-	defaultCodecKey     = "config.node.codec"
-	defaultTimeoutKey   = "config.node.timeout"
-	defaultEncryptorKey = "config.node.encryptor"
-	defaultDecryptorKey = "config.node.decryptor"
+	defaultIDKey        = "config.cluster.node.id"
+	defaultNameKey      = "config.cluster.node.name"
+	defaultCodecKey     = "config.cluster.node.codec"
+	defaultTimeoutKey   = "config.cluster.node.timeout"
+	defaultEncryptorKey = "config.cluster.node.encryptor"
+	defaultDecryptorKey = "config.cluster.node.decryptor"
 )
 
 type Option func(o *options)
@@ -51,35 +50,29 @@ func defaultOptions() *options {
 		timeout: defaultTimeout,
 	}
 
-	id := config.Get(defaultIDKey).String()
-	if id != "" {
+	if id := config.Get(defaultIDKey).String(); id != "" {
 		opts.id = id
 	} else if id, err := xuuid.UUID(); err == nil {
 		opts.id = id
 	}
 
-	name := config.Get(defaultNameKey).String()
-	if name != "" {
+	if name := config.Get(defaultNameKey).String(); name != "" {
 		opts.name = name
 	}
 
-	codec := config.Get(defaultCodecKey).String()
-	if codec != "" {
-		opts.codec = encoding.Invoke(strings.ToLower(codec))
+	if codec := config.Get(defaultCodecKey).String(); codec != "" {
+		opts.codec = encoding.Invoke(codec)
 	}
 
-	timeout := config.Get(defaultTimeoutKey).Int64()
-	if timeout > 0 {
+	if timeout := config.Get(defaultTimeoutKey).Int64(); timeout > 0 {
 		opts.timeout = time.Duration(timeout) * time.Second
 	}
 
-	encryptor := config.Get(defaultEncryptorKey).String()
-	if encryptor != "" {
+	if encryptor := config.Get(defaultEncryptorKey).String(); encryptor != "" {
 		opts.encryptor = crypto.InvokeEncryptor(encryptor)
 	}
 
-	decryptor := config.Get(defaultDecryptorKey).String()
-	if decryptor != "" {
+	if decryptor := config.Get(defaultDecryptorKey).String(); decryptor != "" {
 		opts.decryptor = crypto.InvokeDecryptor(decryptor)
 	}
 

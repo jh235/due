@@ -77,8 +77,8 @@ func (s *defaultSource) loadFile(path string) (*Configuration, error) {
 	ext := filepath.Ext(info.Name())
 
 	return &Configuration{
-		Name:    strings.TrimRight(info.Name(), ext),
-		Format:  strings.TrimLeft(ext, "."),
+		Name:    strings.TrimSuffix(info.Name(), ext),
+		Format:  strings.TrimPrefix(ext, "."),
 		Content: content,
 	}, nil
 }
@@ -90,7 +90,7 @@ func (s *defaultSource) loadDir(path string) (cs []*Configuration, err error) {
 			return err
 		}
 
-		if d.IsDir() {
+		if d.IsDir() || strings.HasSuffix(d.Name(), ".") {
 			return nil
 		}
 

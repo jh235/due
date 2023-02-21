@@ -1,15 +1,13 @@
 package due
 
 import (
+	"fmt"
 	"github.com/dobyte/due/component"
-	_ "github.com/dobyte/due/crypto/rsa"
-	_ "github.com/dobyte/due/encoding/json"
-	_ "github.com/dobyte/due/encoding/proto"
-	_ "github.com/dobyte/due/encoding/toml"
-	_ "github.com/dobyte/due/encoding/xml"
-	_ "github.com/dobyte/due/encoding/yaml"
+	"github.com/dobyte/due/config"
+	"github.com/dobyte/due/eventbus"
 	"github.com/dobyte/due/log"
-	"github.com/dobyte/due/mode"
+	"github.com/dobyte/due/task"
+	"runtime"
 
 	"os"
 	"os/signal"
@@ -18,13 +16,12 @@ import (
 
 type Container struct {
 	sig        chan os.Signal
-	die        chan struct{}
 	components []component.Component
 }
 
 // NewContainer 创建一个容器
 func NewContainer() *Container {
-	return &Container{sig: make(chan os.Signal), die: make(chan struct{})}
+	return &Container{sig: make(chan os.Signal)}
 }
 
 // Add 添加组件
@@ -34,7 +31,7 @@ func (c *Container) Add(components ...component.Component) {
 
 // Serve 启动容器
 func (c *Container) Serve() {
-	debugPrint()
+	log.Debug(fmt.Sprintf("Welcome to the due framework %s, Learn more at %s", Version, Website))
 
 	for _, comp := range c.components {
 		comp.Init()
@@ -44,29 +41,28 @@ func (c *Container) Serve() {
 		comp.Start()
 	}
 
-	signal.Notify(c.sig, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGKILL, syscall.SIGTERM)
-
-	select {
-	case s := <-c.sig:
-		log.Warnf("container got signal %v", s)
-	case <-c.die:
-		log.Warn("container will close")
+	switch runtime.GOOS {
+	case `windows`:
+		signal.Notify(c.sig, syscall.SIGINT, syscall.SIGKILL, syscall.SIGTERM)
+	default:
+		signal.Notify(c.sig, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGABRT, syscall.SIGKILL, syscall.SIGTERM)
 	}
+
+	sig := <-c.sig
+
+	log.Warnf("process got signal %v, container will close", sig)
+
+	signal.Stop(c.sig)
 
 	for _, comp := range c.components {
 		comp.Destroy()
 	}
-}
 
-// Close 关闭容器
-func (c *Container) Close() {
-	c.die <- struct{}{}
-}
+    if err := eventbus.Close(); err != nil {
+        log.Errorf("eventbus close failed: %v", err)
+    }
 
-func debugPrint() {
-	if !mode.IsDebugMode() {
-		return
-	}
+    task.Release()
 
-	log.Debug("Welcome to the due framework, Learn more at https://github.com/dobyte/due")
+    config.Close()
 }

@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"github.com/dobyte/due/cluster"
 	"github.com/dobyte/due/transport"
 )
 
@@ -27,25 +26,49 @@ func (p *provider) LocateNode(ctx context.Context, uid int64) (nid string, miss 
 }
 
 // CheckRouteStateful 检测某个路由是否为有状态路由
-func (p *provider) CheckRouteStateful(route int32) (bool, bool) {
-	return p.node.checkRouteStateful(route)
+func (p *provider) CheckRouteStateful(route int32) (stateful bool, exist bool) {
+	stateful, exist = p.node.router.CheckRouteStateful(route)
+
+	exist = exist || p.node.router.HasDefaultRouteHandler()
+
+	return
 }
 
 // Trigger 触发事件
-func (p *provider) Trigger(event cluster.Event, gid string, uid int64) {
-	p.node.triggerEvent(event, gid, uid)
+func (p *provider) Trigger(ctx context.Context, args *transport.TriggerArgs) (bool, error) {
+	if args.UID <= 0 {
+		return false, ErrInvalidArgument
+	}
+
+	_, miss, err := p.LocateNode(ctx, args.UID)
+	if err != nil {
+		return miss, err
+	}
+
+	p.node.events.trigger(args.Event, args.GID, args.CID, args.UID)
+
+	return false, nil
 }
 
 // Deliver 投递消息
-func (p *provider) Deliver(gid, nid string, cid, uid int64, message *transport.Message) {
-	p.node.deliverRequest(&request{
-		gid:   gid,
-		nid:   nid,
-		cid:   cid,
-		uid:   uid,
-		node:  p.node,
-		seq:   message.Seq,
-		route: message.Route,
-		data:  message.Buffer,
-	})
+func (p *provider) Deliver(ctx context.Context, args *transport.DeliverArgs) (bool, error) {
+	stateful, ok := p.CheckRouteStateful(args.Message.Route)
+	if !ok {
+		return false, nil
+	}
+
+	if stateful {
+		if args.UID <= 0 {
+			return false, ErrInvalidArgument
+		}
+
+		_, miss, err := p.LocateNode(ctx, args.UID)
+		if err != nil {
+			return miss, err
+		}
+	}
+
+	p.node.router.deliver(args.GID, args.NID, args.CID, args.UID, args.Message.Seq, args.Message.Route, args.Message.Buffer)
+
+	return false, nil
 }

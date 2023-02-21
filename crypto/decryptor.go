@@ -1,8 +1,9 @@
 package crypto
 
 import (
+	"github.com/dobyte/due/crypto/ecc"
+	"github.com/dobyte/due/crypto/rsa"
 	"github.com/dobyte/due/log"
-	"strings"
 )
 
 type Decryptor interface {
@@ -14,13 +15,18 @@ type Decryptor interface {
 
 var decryptors = make(map[string]Decryptor)
 
-// RegistryDecryptor 注册解密器
-func RegistryDecryptor(decryptor Decryptor) {
+func init() {
+	RegisterDecryptor(ecc.DefaultDecryptor)
+	RegisterDecryptor(rsa.DefaultDecryptor)
+}
+
+// RegisterDecryptor 注册解密器
+func RegisterDecryptor(decryptor Decryptor) {
 	if decryptor == nil {
 		log.Fatal("can't register a invalid decryptor")
 	}
 
-	name := strings.ToLower(decryptor.Name())
+	name := decryptor.Name()
 
 	if name == "" {
 		log.Fatal("can't register a decryptor without name")

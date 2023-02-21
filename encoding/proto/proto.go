@@ -10,18 +10,12 @@ package proto
 import (
 	"errors"
 
-	"google.golang.org/protobuf/proto"
-
-	"github.com/dobyte/due/encoding"
+	"github.com/gogo/protobuf/proto"
 )
 
 const Name = "proto"
 
-var _ encoding.Codec = &codec{}
-
-func init() {
-	encoding.Register(&codec{})
-}
+var DefaultCodec = &codec{}
 
 type codec struct{}
 
@@ -48,4 +42,14 @@ func (codec) Unmarshal(data []byte, v interface{}) error {
 	}
 
 	return proto.Unmarshal(data, msg)
+}
+
+// Marshal 编码
+func Marshal(v interface{}) ([]byte, error) {
+	return DefaultCodec.Marshal(v)
+}
+
+// Unmarshal 解码
+func Unmarshal(data []byte, v interface{}) error {
+	return DefaultCodec.Unmarshal(data, v)
 }
