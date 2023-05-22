@@ -21,6 +21,8 @@ import (
 	"github.com/dobyte/due/network"
 )
 
+var closeMessage = websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
+
 type serverConn struct {
 	rw                sync.RWMutex    // 锁
 	id                int64           // 连接ID
@@ -202,6 +204,10 @@ func (c *serverConn) read() {
 			return
 		}
 
+		if msgType == websocket.CloseMessage || msgType == websocket.PingMessage || msgType == websocket.PongMessage {
+			continue
+		}
+
 		if len(msg) > c.connMgr.server.opts.maxMsgLen {
 			log.Warnf("the msg size too large, has been ignored")
 			continue
@@ -243,23 +249,33 @@ func (c *serverConn) graceClose() (err error) {
 	<-c.done
 
 	c.rw.Lock()
-	atomic.StoreInt32(&c.state, int32(network.ConnClosed))
-	err = c.conn.Close()
-	c.rw.Unlock()
+	defer c.rw.Unlock()
 
-	return
+	atomic.StoreInt32(&c.state, int32(network.ConnClosed))
+
+	err = c.conn.WriteControl(websocket.CloseMessage, closeMessage, xtime.Now().Add(10*time.Millisecond))
+	if err != nil {
+		log.Warnf("write control message error: %v", err)
+	}
+
+	return c.conn.Close()
 }
 
 // 强制关闭
-func (c *serverConn) forceClose() error {
+func (c *serverConn) forceClose() (err error) {
 	c.rw.Lock()
 	defer c.rw.Unlock()
 
-	if err := c.checkState(); err != nil {
+	if err = c.checkState(); err != nil {
 		return err
 	}
 
 	atomic.StoreInt32(&c.state, int32(network.ConnClosed))
+
+	err = c.conn.WriteControl(websocket.CloseMessage, closeMessage, xtime.Now().Add(10*time.Millisecond))
+	if err != nil {
+		log.Warnf("write control message error: %v", err)
+	}
 
 	return c.conn.Close()
 }
