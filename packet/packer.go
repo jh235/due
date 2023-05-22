@@ -5,13 +5,16 @@ import (
 	"encoding/binary"
 	"github.com/dobyte/due/errors"
 	"github.com/dobyte/due/log"
+	"sync"
 )
 
 var (
-	ErrMessageIsNil   = errors.New("the message is nil")
-	ErrSeqOverflow    = errors.New("the message seq overflow")
-	ErrRouteOverflow  = errors.New("the message route overflow")
-	ErrInvalidMessage = errors.New("invalid message")
+	ErrMessageIsNil    = errors.New("the message is nil")
+	ErrSeqOverflow     = errors.New("the message seq overflow")
+	ErrRouteOverflow   = errors.New("the message route overflow")
+	ErrBufferOverflow  = errors.New("the message buffer overflow")
+	ErrInvalidMessage  = errors.New("invalid message")
+	ErrMessageTooLarge = errors.New("the message too large")
 )
 
 type Packer interface {
@@ -22,7 +25,9 @@ type Packer interface {
 }
 
 type defaultPacker struct {
-	opts *options
+	opts    *options
+	buffers sync.Pool
+	readers sync.Pool
 }
 
 func NewPacker(opts ...Option) Packer {
@@ -36,10 +41,18 @@ func NewPacker(opts ...Option) Packer {
 	}
 
 	if o.routeBytesLen != 1 && o.routeBytesLen != 2 && o.routeBytesLen != 4 {
-		log.Fatalf("the route bytes length must be 1、2、4, and give %d", o.seqBytesLen)
+		log.Fatalf("the route bytes length must be 1、2、4, and give %d", o.routeBytesLen)
 	}
 
-	return &defaultPacker{opts: o}
+	if o.bufferBytesLen < 0 {
+		log.Fatalf("the buffer bytes length must greater than 0, and give %d", o.bufferBytesLen)
+	}
+
+	return &defaultPacker{opts: o, buffers: sync.Pool{New: func() interface{} {
+		buf := &bytes.Buffer{}
+		buf.Grow(o.seqBytesLen + o.routeBytesLen + o.bufferBytesLen)
+		return buf
+	}}}
 }
 
 // Pack 打包消息
@@ -58,20 +71,27 @@ func (p *defaultPacker) Pack(message *Message) ([]byte, error) {
 		return nil, ErrRouteOverflow
 	}
 
+	if len(message.Buffer) > p.opts.bufferBytesLen {
+		return nil, ErrBufferOverflow
+	}
+
 	var (
-		buf bytes.Buffer
 		err error
+		buf = p.buffers.Get().(*bytes.Buffer)
 	)
 
-	buf.Grow(len(message.Buffer) + p.opts.seqBytesLen + p.opts.routeBytesLen)
+	defer func() {
+		buf.Reset()
+		p.buffers.Put(buf)
+	}()
 
 	switch p.opts.seqBytesLen {
 	case 1:
-		err = binary.Write(&buf, p.opts.byteOrder, int8(message.Seq))
+		err = binary.Write(buf, p.opts.byteOrder, int8(message.Seq))
 	case 2:
-		err = binary.Write(&buf, p.opts.byteOrder, int16(message.Seq))
+		err = binary.Write(buf, p.opts.byteOrder, int16(message.Seq))
 	case 4:
-		err = binary.Write(&buf, p.opts.byteOrder, message.Seq)
+		err = binary.Write(buf, p.opts.byteOrder, message.Seq)
 	}
 	if err != nil {
 		return nil, err
@@ -79,17 +99,17 @@ func (p *defaultPacker) Pack(message *Message) ([]byte, error) {
 
 	switch p.opts.routeBytesLen {
 	case 1:
-		err = binary.Write(&buf, p.opts.byteOrder, int8(message.Route))
+		err = binary.Write(buf, p.opts.byteOrder, int8(message.Route))
 	case 2:
-		err = binary.Write(&buf, p.opts.byteOrder, int16(message.Route))
+		err = binary.Write(buf, p.opts.byteOrder, int16(message.Route))
 	case 4:
-		err = binary.Write(&buf, p.opts.byteOrder, message.Route)
+		err = binary.Write(buf, p.opts.byteOrder, message.Route)
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	err = binary.Write(&buf, p.opts.byteOrder, message.Buffer)
+	err = binary.Write(buf, p.opts.byteOrder, message.Buffer)
 	if err != nil {
 		return nil, err
 	}
@@ -103,6 +123,10 @@ func (p *defaultPacker) Unpack(data []byte) (*Message, error) {
 
 	if ln < 0 {
 		return nil, ErrInvalidMessage
+	}
+
+	if ln > p.opts.bufferBytesLen {
+		return nil, ErrMessageTooLarge
 	}
 
 	var (
