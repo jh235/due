@@ -86,10 +86,11 @@ func (c *serverConn) Push(msg []byte, msgType ...int) (err error) {
 	switch msgTyp := c.extractMsgType(msgType...); msgTyp {
 	case TextMessage, BinaryMessage:
 		c.chWrite <- chWrite{typ: dataPacket, msg: msg, msgType: msgTyp}
-		return
 	default:
-		return network.ErrIllegalMsgType
+		err = network.ErrIllegalMsgType
 	}
+
+	return
 }
 
 // 提取消息类型

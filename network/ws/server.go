@@ -9,11 +9,11 @@ package ws
 
 import (
 	"github.com/dobyte/due/log"
+	"github.com/dobyte/due/network"
 	"github.com/gorilla/websocket"
 	"net"
 	"net/http"
-
-	"github.com/dobyte/due/network"
+	"sync"
 )
 
 type UpgradeHandler func(w http.ResponseWriter, r *http.Request) (allowed bool)
@@ -107,8 +107,11 @@ func (s *server) init() error {
 // 启动服务器
 func (s *server) serve() {
 	upgrader := websocket.Upgrader{
-		ReadBufferSize:    4096,
-		WriteBufferSize:   4096,
+		ReadBufferSize:  s.opts.maxMsgLen,
+		WriteBufferSize: s.opts.maxMsgLen,
+		WriteBufferPool: &sync.Pool{New: func() interface{} {
+			return make([]byte, s.opts.maxMsgLen)
+		}},
 		EnableCompression: true,
 		CheckOrigin:       s.opts.checkOrigin,
 	}
